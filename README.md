@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <video src="./assets/readme/bulker-demo.mp4" controls autoplay muted loop width="900"></video>
+  <img src="./assets/readme/bulker-demo.gif" alt="Bulker demo" width="900">
 </p>
 
 Bulker is a frontend-first workflow variant queue builder for ComfyUI.
