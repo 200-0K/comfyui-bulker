@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comfyui-bulker"
+description = "Frontend-first workflow variant queue builder for ComfyUI"
+version = "0.1.0"
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/200-0K/comfyui-bulker"
+Documentation = "https://github.com/200-0K/comfyui-bulker"
+Issues = "https://github.com/200-0K/comfyui-bulker/issues"
+
+[tool.comfy]
+PublisherId = "err0r"
+DisplayName = "Bulker"
+Icon = "https://raw.githubusercontent.com/200-0K/comfyui-bulker/master/assets/readme/bulker-icon.png"
