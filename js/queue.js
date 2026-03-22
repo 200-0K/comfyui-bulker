@@ -136,7 +136,7 @@ export async function queueCombinations({
     onProgress?.({ queuedJobs, totalJobs, summary, phase: "queueing" });
 
     const payload = applyCombination(ensureQueuePayload(basePrompt), combination);
-    await api.queuePrompt(-1, payload);
+    await api.queuePrompt(0, payload);
     queuedJobs += 1;
 
     onProgress?.({ queuedJobs, totalJobs, summary, phase: "queued" });
