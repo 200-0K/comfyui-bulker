@@ -6,6 +6,30 @@ function makeModifierId() {
   return `bulker-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
+function makeModifierValueId() {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `bulker-value-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+export function createModifierValueRow(partial = {}) {
+  const isObjectLike = partial != null && typeof partial === "object" && !Array.isArray(partial);
+  const value = isObjectLike && "value" in partial ? partial.value : partial;
+  const rawRepeat = isObjectLike && "repeat" in partial ? Number(partial.repeat) : 1;
+
+  return {
+    id: isObjectLike && partial.id ? String(partial.id) : makeModifierValueId(),
+    value,
+    repeat: Number.isFinite(rawRepeat) ? Math.max(1, Math.round(rawRepeat)) : 1,
+  };
+}
+
+export function createModifierValueRows(values) {
+  return Array.isArray(values) ? values.map((value) => createModifierValueRow(value)) : [];
+}
+
 export function createModifier(partial = {}) {
   return {
     id: partial.id ?? makeModifierId(),
@@ -15,7 +39,7 @@ export function createModifier(partial = {}) {
     inputLabel: partial.inputLabel ?? "",
     inputType: partial.inputType ?? "",
     widgetType: partial.widgetType ?? "",
-    values: Array.isArray(partial.values) ? [...partial.values] : [],
+    values: createModifierValueRows(partial.values),
     manualValueText: partial.manualValueText ?? "",
     optionFilter: partial.optionFilter ?? "",
     parseErrors: Array.isArray(partial.parseErrors) ? [...partial.parseErrors] : [],
@@ -45,7 +69,11 @@ export function serializeState(state) {
       inputLabel: modifier.inputLabel,
       inputType: modifier.inputType,
       widgetType: modifier.widgetType,
-      values: Array.isArray(modifier.values) ? [...modifier.values] : [],
+      values: createModifierValueRows(modifier.values).map((row) => ({
+        id: row.id,
+        value: row.value,
+        repeat: row.repeat,
+      })),
       manualValueText: modifier.manualValueText ?? "",
       optionFilter: modifier.optionFilter ?? "",
     })),

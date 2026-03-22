@@ -4,13 +4,17 @@ export function getValidModifiers(modifiers) {
   return (modifiers ?? []).filter((modifier) => modifier.valid && modifier.values?.length);
 }
 
+export function getModifierExecutionCount(modifier) {
+  return (modifier?.values ?? []).reduce((total, row) => total + Math.max(1, Number(row?.repeat) || 1), 0);
+}
+
 export function getJobCount(modifiers) {
   const validModifiers = getValidModifiers(modifiers);
   if (!validModifiers.length) {
     return 0;
   }
 
-  return validModifiers.reduce((total, modifier) => total * modifier.values.length, 1);
+  return validModifiers.reduce((total, modifier) => total * getModifierExecutionCount(modifier), 1);
 }
 
 export function* iterateCombinations(modifiers, index = 0, current = []) {
@@ -20,18 +24,22 @@ export function* iterateCombinations(modifiers, index = 0, current = []) {
   }
 
   const modifier = modifiers[index];
-  for (const value of modifier.values) {
-    current.push({
-      modifierId: modifier.id,
-      nodeId: modifier.nodeId,
-      nodeLabel: modifier.nodeLabel,
-      inputName: modifier.inputName,
-      inputLabel: modifier.inputLabel,
-      inputType: modifier.inputType,
-      value,
-    });
-    yield* iterateCombinations(modifiers, index + 1, current);
-    current.pop();
+  for (const row of modifier.values) {
+    const repeat = Math.max(1, Number(row?.repeat) || 1);
+    for (let repeatIndex = 0; repeatIndex < repeat; repeatIndex += 1) {
+      current.push({
+        modifierId: modifier.id,
+        rowId: row?.id ?? null,
+        nodeId: modifier.nodeId,
+        nodeLabel: modifier.nodeLabel,
+        inputName: modifier.inputName,
+        inputLabel: modifier.inputLabel,
+        inputType: modifier.inputType,
+        value: row?.value,
+      });
+      yield* iterateCombinations(modifiers, index + 1, current);
+      current.pop();
+    }
   }
 }
 

@@ -1,4 +1,4 @@
-function toKey(valueType, value) {
+export function getValueKey(valueType, value) {
   if (valueType === "number") {
     return `number:${Number(value)}`;
   }
@@ -15,7 +15,7 @@ export function dedupeValues(valueType, values) {
   const uniqueValues = [];
 
   for (const value of values ?? []) {
-    const key = toKey(valueType, value);
+    const key = getValueKey(valueType, value);
     if (seen.has(key)) {
       continue;
     }

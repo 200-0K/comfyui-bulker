@@ -5,6 +5,7 @@ import {
   formatCombinationSummary,
   getCombinationPreview,
   getJobCount,
+  getModifierExecutionCount,
   getValidModifiers,
 } from "./combinations.js";
 import {
@@ -15,8 +16,8 @@ import {
   validateModifier,
 } from "./graph.js";
 import { loadState, saveState } from "./persistence.js";
-import { createModifier, createState } from "./state.js";
-import { dedupeValues, formatValue, parseManualValues } from "./values.js";
+import { createModifier, createModifierValueRow, createState } from "./state.js";
+import { dedupeValues, formatValue, getValueKey, parseManualValues, valuesToText } from "./values.js";
 
 const EXTENSION_NAME = "bulker";
 const EXTENSION_LABEL = "Bulker";
@@ -25,6 +26,8 @@ const DEBUG = false;
 const MIN_MODAL_WIDTH = 720;
 const MIN_MODAL_HEIGHT = 520;
 const EDGE_PADDING = 16;
+const VALUE_TRANSITION_MS = 180;
+const REPEAT_BADGE_POP_MS = 140;
 
 const ICONS = {
   add: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>`,
@@ -42,6 +45,7 @@ const ICONS = {
   close: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>`,
   plusBox: `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="2"/><path d="M8 5.25v5.5M5.25 8h5.5"/></svg>`,
   checkBox: `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="2"/><path d="M5.5 8.25l1.75 1.75 3.25-3.5"/></svg>`,
+  grip: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.25 3.5h.01M5.25 8h.01M5.25 12.5h.01M10.75 3.5h.01M10.75 8h.01M10.75 12.5h.01"/></svg>`,
   dot: `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/></svg>`,
 };
 
@@ -209,8 +213,68 @@ function summarizeModifierState(modifier) {
 }
 
 function formatFactorFormula(modifiers) {
-  const factors = getValidModifiers(modifiers).map((modifier) => modifier.values.length);
+  const factors = getValidModifiers(modifiers).map((modifier) => getModifierExecutionCount(modifier));
   return factors.length ? factors.join(" x ") : "0";
+}
+
+function getRowRepeat(row) {
+  return Math.max(1, Number(row?.repeat) || 1);
+}
+
+function getRowValueKey(inputType, row) {
+  return getValueKey(inputType, row?.value);
+}
+
+function expandModifierRows(rows) {
+  const expanded = [];
+
+  for (const row of rows ?? []) {
+    for (let repeatIndex = 0; repeatIndex < getRowRepeat(row); repeatIndex += 1) {
+      expanded.push(row?.value);
+    }
+  }
+
+  return expanded;
+}
+
+function syncManualValueText(modifier, rows) {
+  if (modifier.inputType === "combo") {
+    return modifier.manualValueText;
+  }
+
+  return valuesToText(expandModifierRows(rows));
+}
+
+function setModifierRows(modifier, rows) {
+  return {
+    ...modifier,
+    values: rows,
+    manualValueText: syncManualValueText(modifier, rows),
+  };
+}
+
+function createUniqueRows(modifier, values) {
+  const existingKeys = new Set((modifier.values ?? []).map((row) => getRowValueKey(modifier.inputType, row)));
+  return dedupeValues(modifier.inputType, values)
+    .filter((value) => !existingKeys.has(getValueKey(modifier.inputType, value)))
+    .map((value) => createModifierValueRow({ value, repeat: 1 }));
+}
+
+function getSelectedRowDropPosition(event) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  return event.clientY >= rect.top + rect.height / 2 ? "after" : "before";
+}
+
+function getAvailablePaneEmptyMessage(filteredOptions, filteredAvailableOptions) {
+  if (!filteredOptions.length) {
+    return "No matches";
+  }
+
+  if (!filteredAvailableOptions.length) {
+    return "All matching values are selected";
+  }
+
+  return "No matches";
 }
 
 class BulkerDialog {
@@ -323,6 +387,7 @@ class BulkerController {
     this.skipNextFocusRestore = false;
     this.modalRect = getDefaultModalRect();
     this.dragState = null;
+    this.selectedRowDrag = null;
     this.resizeState = null;
     this.dialog = new BulkerDialog(this);
     this.toolbarButton = null;
@@ -341,7 +406,7 @@ class BulkerController {
         const parsed = parseManualValues(modifier.inputType, modifier.manualValueText);
         return {
           ...modifier,
-          values: parsed.values,
+          values: parsed.values.map((value) => createModifierValueRow({ value, repeat: 1 })),
           parseErrors: parsed.errors,
         };
       }
@@ -383,6 +448,11 @@ class BulkerController {
         draftError: "",
         pasteOpen: false,
         pasteBuffer: modifier?.manualValueText ?? "",
+        animations: {
+          enteringSelected: new Set(),
+          leavingAvailable: new Map(),
+          bumpRepeat: new Set(),
+        },
         pickers: {
           node: createPickerState(),
           input: createPickerState(),
@@ -404,6 +474,93 @@ class BulkerController {
     for (const modifier of this.state.modifiers) {
       this.getModifierUiState(modifier.id);
     }
+  }
+
+  scheduleModifierAnimationCleanup(modifierId, cleanup, delay = VALUE_TRANSITION_MS) {
+    window.setTimeout(() => {
+      const uiState = this.uiState.modifiers[modifierId];
+      if (!uiState) {
+        return;
+      }
+
+      cleanup(uiState);
+      if (this.getModifier(modifierId)) {
+        this.renderModifierUpdate(modifierId);
+      }
+    }, delay);
+  }
+
+  markSelectedRowEntering(modifierId, rowId) {
+    const uiState = this.getModifierUiState(modifierId);
+    uiState.animations.enteringSelected.add(rowId);
+    this.scheduleModifierAnimationCleanup(modifierId, (nextUiState) => {
+      nextUiState.animations.enteringSelected.delete(rowId);
+    });
+  }
+
+  markAvailableValueLeaving(modifierId, value) {
+    const modifier = this.getModifier(modifierId);
+    if (!modifier) {
+      return;
+    }
+
+    const uiState = this.getModifierUiState(modifierId);
+    const valueKey = getValueKey(modifier.inputType, value);
+    uiState.animations.leavingAvailable.set(valueKey, value);
+    this.scheduleModifierAnimationCleanup(modifierId, (nextUiState) => {
+      nextUiState.animations.leavingAvailable.delete(valueKey);
+    });
+  }
+
+  bumpRepeatBadge(modifierId, rowId) {
+    const uiState = this.getModifierUiState(modifierId);
+    uiState.animations.bumpRepeat.add(rowId);
+    this.scheduleModifierAnimationCleanup(modifierId, (nextUiState) => {
+      nextUiState.animations.bumpRepeat.delete(rowId);
+    }, REPEAT_BADGE_POP_MS);
+  }
+
+  appendModifierRows(modifierId, values, { duplicateMessage = "", animateAvailable = false } = {}) {
+    const modifier = this.getModifier(modifierId);
+    if (!modifier) {
+      return { added: false, message: duplicateMessage };
+    }
+
+    const nextRows = createUniqueRows(modifier, values ?? []);
+    if (!nextRows.length) {
+      return { added: false, message: duplicateMessage };
+    }
+
+    this.prepareSelectionMutation();
+
+    nextRows.forEach((row) => {
+      if (animateAvailable) {
+        this.markAvailableValueLeaving(modifierId, row.value);
+      }
+      this.markSelectedRowEntering(modifierId, row.id);
+    });
+
+    this.updateModifier(modifierId, (currentModifier) =>
+      setModifierRows(currentModifier, [...currentModifier.values, ...nextRows])
+    );
+
+    return { added: true, message: "" };
+  }
+
+  updateModifierRowRepeat(modifierId, rowId, updater) {
+    this.updateModifier(modifierId, (modifier) =>
+      setModifierRows(
+        modifier,
+        modifier.values.map((row) =>
+          row.id === rowId
+            ? {
+                ...row,
+                repeat: Math.max(1, Math.round(updater(getRowRepeat(row)))),
+              }
+            : row
+        )
+      )
+    );
   }
 
   captureFocusSnapshot() {
@@ -586,6 +743,7 @@ class BulkerController {
   close() {
     this.state.ui.open = false;
     this.closeAllPickers();
+    this.selectedRowDrag = null;
     this.persist();
     this.dialog.close();
   }
@@ -663,6 +821,145 @@ class BulkerController {
   endPointerAction() {
     this.dragState = null;
     this.resizeState = null;
+  }
+
+  clearSelectedRowDropIndicator() {
+    if (!this.selectedRowDrag?.indicatorElement) {
+      return;
+    }
+
+    this.selectedRowDrag.indicatorElement.classList.remove(
+      "is-drop-before",
+      "is-drop-after",
+      "is-drop-target"
+    );
+    this.selectedRowDrag.indicatorElement = null;
+    this.selectedRowDrag.dropPosition = null;
+    this.selectedRowDrag.dropRowId = null;
+  }
+
+  startSelectedRowDrag(event, modifierId, rowId) {
+    if (this.queueState.active) {
+      event.preventDefault();
+      return;
+    }
+
+    event.stopPropagation();
+    this.stashScrollSnapshot();
+    this.selectedRowDrag = {
+      modifierId,
+      rowId,
+      indicatorElement: null,
+      dropPosition: null,
+      dropRowId: null,
+    };
+
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", rowId);
+    }
+
+    const rowElement = event.currentTarget.closest(".bulker-selected-row");
+    if (rowElement) {
+      rowElement.classList.add("is-dragging");
+    }
+  }
+
+  updateSelectedRowDropIndicator(element, position, rowId) {
+    if (!this.selectedRowDrag) {
+      return;
+    }
+
+    if (this.selectedRowDrag.indicatorElement !== element) {
+      this.clearSelectedRowDropIndicator();
+    }
+
+    element.classList.add("is-drop-target");
+    element.classList.toggle("is-drop-before", position === "before");
+    element.classList.toggle("is-drop-after", position === "after");
+    this.selectedRowDrag.indicatorElement = element;
+    this.selectedRowDrag.dropPosition = position;
+    this.selectedRowDrag.dropRowId = rowId;
+  }
+
+  handleSelectedRowDragOver(event, modifierId, rowId) {
+    if (!this.selectedRowDrag || this.selectedRowDrag.modifierId !== modifierId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (this.selectedRowDrag.rowId === rowId) {
+      this.clearSelectedRowDropIndicator();
+      return;
+    }
+
+    const position = getSelectedRowDropPosition(event);
+    this.updateSelectedRowDropIndicator(event.currentTarget, position, rowId);
+  }
+
+  handleSelectedRowDragLeave(event) {
+    if (!this.selectedRowDrag || this.selectedRowDrag.indicatorElement !== event.currentTarget) {
+      return;
+    }
+
+    const nextTarget = event.relatedTarget;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+
+    this.clearSelectedRowDropIndicator();
+  }
+
+  moveModifierValueRow(modifierId, rowId, targetRowId, position) {
+    if (!targetRowId || !position) {
+      return;
+    }
+
+    this.prepareSelectionMutation();
+    this.updateModifier(modifierId, (modifier) => {
+      const rows = [...modifier.values];
+      const fromIndex = rows.findIndex((row) => row.id === rowId);
+      const targetIndex = rows.findIndex((row) => row.id === targetRowId);
+      if (fromIndex === -1 || targetIndex === -1) {
+        return modifier;
+      }
+
+      const [movedRow] = rows.splice(fromIndex, 1);
+      const insertionIndex = rows.findIndex((row) => row.id === targetRowId);
+      if (insertionIndex === -1) {
+        rows.push(movedRow);
+      } else {
+        rows.splice(position === "after" ? insertionIndex + 1 : insertionIndex, 0, movedRow);
+      }
+
+      return setModifierRows(modifier, rows);
+    });
+  }
+
+  handleSelectedRowDrop(event, modifierId, rowId) {
+    if (!this.selectedRowDrag || this.selectedRowDrag.modifierId !== modifierId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (this.selectedRowDrag.rowId === rowId) {
+      this.clearSelectedRowDropIndicator();
+      return;
+    }
+
+    const position = getSelectedRowDropPosition(event);
+    this.moveModifierValueRow(modifierId, this.selectedRowDrag.rowId, rowId, position);
+    this.clearSelectedRowDropIndicator();
+  }
+
+  endSelectedRowDrag(event) {
+    event.currentTarget.closest(".bulker-selected-row")?.classList.remove("is-dragging");
+    this.clearSelectedRowDropIndicator();
+    this.selectedRowDrag = null;
   }
 
   render() {
@@ -972,8 +1269,14 @@ class BulkerController {
   renderComboValues(modifier, selectedWidget) {
     const options = selectedWidget?.options ?? [];
     const filterText = modifier.optionFilter.trim().toLowerCase();
+    const selectedValueKeys = new Set(modifier.values.map((row) => getRowValueKey(modifier.inputType, row)));
     const filteredOptions = options.filter((option) => option.toLowerCase().includes(filterText));
-    const addedValues = new Set(modifier.values.map((value) => String(value)));
+    const availableOptions = options.filter(
+      (option) => !selectedValueKeys.has(getValueKey(modifier.inputType, option))
+    );
+    const filteredAvailableOptions = filteredOptions.filter(
+      (option) => !selectedValueKeys.has(getValueKey(modifier.inputType, option))
+    );
 
     return $el("div.bulker-values", {}, [
       $el("div.bulker-values-toolbar", {}, [
@@ -995,8 +1298,8 @@ class BulkerController {
           createIconButton({
             icon: "forward",
             title: "Add all filtered values",
-            onclick: () => this.addAllFilteredOptions(modifier.id, filteredOptions),
-            disabled: this.queueState.active || filteredOptions.length === 0,
+            onclick: () => this.addAllFilteredOptions(modifier.id, filteredAvailableOptions),
+            disabled: this.queueState.active || filteredAvailableOptions.length === 0,
           }),
           createIconButton({
             icon: "trash",
@@ -1008,7 +1311,7 @@ class BulkerController {
         ]),
       ]),
       $el("div.bulker-values-grid", {}, [
-        this.renderAvailablePane(modifier, filteredOptions, options.length, addedValues),
+        this.renderAvailablePane(modifier, filteredAvailableOptions, availableOptions.length, filteredOptions),
         this.renderSelectedPane(modifier),
       ]),
       !options.length
@@ -1106,13 +1409,50 @@ class BulkerController {
     ].filter(Boolean));
   }
 
-  renderAvailablePane(modifier, filteredOptions, totalOptions, addedValues) {
+  renderAvailablePane(modifier, filteredAvailableOptions, totalOptions, filteredOptions) {
+    const uiState = this.getModifierUiState(modifier.id);
+    const visibleKeys = new Set(
+      filteredAvailableOptions.map((option) => getValueKey(modifier.inputType, option))
+    );
+    const rows = [];
+
+    for (const option of filteredOptions) {
+      const valueKey = getValueKey(modifier.inputType, option);
+      if (visibleKeys.has(valueKey)) {
+        rows.push(
+          this.renderValueRow({
+            label: displayText(option, "Empty"),
+            leadingIcon: "plusBox",
+            title: displayText(option, "Empty"),
+            disabled: this.queueState.active,
+            onclick: () => this.addComboValue(modifier.id, option),
+          })
+        );
+        continue;
+      }
+
+      if (uiState.animations.leavingAvailable.has(valueKey)) {
+        rows.push(
+          this.renderValueRow({
+            label: displayText(option, "Empty"),
+            leadingIcon: "plusBox",
+            title: displayText(option, "Empty"),
+            disabled: true,
+            rowClassName: "is-leaving",
+            shellClassName: "is-leaving-shell",
+          })
+        );
+      }
+    }
+
+    const emptyMessage = getAvailablePaneEmptyMessage(filteredOptions, filteredAvailableOptions);
+
     return $el("div.bulker-value-pane", {}, [
       $el("div.bulker-pane-head", {}, [
         $el("span", { textContent: "Available" }),
-        $el("span", { textContent: `${filteredOptions.length}/${totalOptions}` }),
+        $el("span", { textContent: `${filteredAvailableOptions.length}/${totalOptions}` }),
       ]),
-      filteredOptions.length
+      rows.length
         ? $el(
             "div.bulker-value-list",
             {
@@ -1120,24 +1460,15 @@ class BulkerController {
                 bulkerScrollKey: `modifier:${modifier.id}:available-values`,
               },
             },
-            filteredOptions.map((option) => {
-              const isAdded = addedValues.has(option);
-              return this.renderValueRow({
-                label: displayText(option, "Empty"),
-                selected: isAdded,
-                added: false,
-                leadingIcon: isAdded ? "checkBox" : "plusBox",
-                title: displayText(option, "Empty"),
-                disabled: this.queueState.active,
-                onclick: () => this.toggleComboValue(modifier.id, option),
-              });
-            })
+            rows
           )
-        : $el("div.bulker-inline-note", { textContent: "No matches" }),
+        : $el("div.bulker-inline-note", { textContent: emptyMessage }),
     ]);
   }
 
   renderSelectedPane(modifier) {
+    const uiState = this.getModifierUiState(modifier.id);
+
     return $el("div.bulker-value-pane", {}, [
       $el("div.bulker-pane-head", {}, [
         $el("span", { textContent: "Selected" }),
@@ -1151,44 +1482,153 @@ class BulkerController {
                 bulkerScrollKey: `modifier:${modifier.id}:selected-values`,
               },
             },
-            modifier.values.map((value, valueIndex) => {
-              return this.renderValueRow({
-                label: displayValue(value),
-                selected: true,
-                added: false,
-                leadingIcon: "checkBox",
-                title: displayValue(value),
-                disabled: this.queueState.active,
-                onclick: () => this.removeModifierValue(modifier.id, valueIndex),
-              });
-            })
+            modifier.values.map((row) => this.renderSelectedValueRow(modifier, row, uiState))
           )
         : $el("div.bulker-inline-note", { textContent: "No values yet" }),
     ]);
   }
 
+  renderSelectedValueRow(modifier, row, uiState) {
+    const label = displayValue(row.value);
+    const repeat = getRowRepeat(row);
+    const isEntering = uiState.animations.enteringSelected.has(row.id);
+    const isBumping = uiState.animations.bumpRepeat.has(row.id);
+    const selectedRowClassName = `bulker-value-row-shell bulker-selected-row ${
+      isEntering ? "is-entering" : ""
+    }`.trim();
+
+    return $el(
+      "div",
+      {
+        className: selectedRowClassName,
+        title: label,
+        dataset: { rowId: row.id },
+        ondragover: (event) => this.handleSelectedRowDragOver(event, modifier.id, row.id),
+        ondragleave: (event) => this.handleSelectedRowDragLeave(event),
+        ondrop: (event) => this.handleSelectedRowDrop(event, modifier.id, row.id),
+      },
+      [
+        $el("div.bulker-value-row.is-selected.bulker-selected-value-row", {}, [
+          this.renderSelectedRowDragHandle(modifier.id, row.id),
+          $el("div.bulker-value-row-main", {}, [
+            $el("span.bulker-value-label", { textContent: truncate(label, 64) }),
+          ]),
+          this.renderRepeatStepper(modifier.id, row.id, repeat, isBumping),
+          this.renderSelectedActionButton({
+            icon: "trash",
+            title: "Remove selected value",
+            disabled: this.queueState.active,
+            className: "bulker-row-trash-button",
+            onclick: () => this.removeModifierValue(modifier.id, row.id),
+          }),
+        ]),
+      ]
+    );
+  }
+
+  renderSelectedRowDragHandle(modifierId, rowId) {
+    return $el(
+      "button.bulker-sort-handle",
+      {
+        ...this.getSelectedActionProps({
+          title: "Drag to reorder",
+          disabled: this.queueState.active,
+          onclick: null,
+        }),
+        draggable: !this.queueState.active,
+        onmousedown: (event) => {
+          this.stashScrollSnapshot();
+          event.stopPropagation();
+        },
+        ondragstart: (event) => this.startSelectedRowDrag(event, modifierId, rowId),
+        ondragend: (event) => this.endSelectedRowDrag(event),
+      },
+      [getIcon("grip")]
+    );
+  }
+
+  renderRepeatStepper(modifierId, rowId, repeat, isBumping) {
+    const repeatCountClassName = `bulker-repeat-count ${isBumping ? "is-bumping" : ""}`.trim();
+
+    return $el("div.bulker-repeat-stepper", {}, [
+      this.renderRepeatButton("-", "Decrease repeat or remove value", this.queueState.active, () =>
+        this.decrementModifierValueRepeat(modifierId, rowId)
+      ),
+      $el("span", {
+        className: repeatCountClassName,
+        textContent: `x${repeat}`,
+      }),
+      this.renderRepeatButton("+", "Increase repeat", this.queueState.active, () =>
+        this.incrementModifierValueRepeat(modifierId, rowId)
+      ),
+    ]);
+  }
+
+  getSelectedActionProps({ title, disabled, onclick }) {
+    return {
+      type: "button",
+      title,
+      disabled,
+      "aria-label": title,
+      onmousedown: (event) => {
+        this.stashScrollSnapshot();
+        event.preventDefault();
+        event.stopPropagation();
+      },
+      onclick: onclick
+        ? (event) => {
+            event.stopPropagation();
+            onclick();
+          }
+        : null,
+    };
+  }
+
+  renderRepeatButton(label, title, disabled, onclick) {
+    return $el(
+      "button.bulker-repeat-button",
+      this.getSelectedActionProps({ title, disabled, onclick }),
+      [$el("span", { textContent: label })]
+    );
+  }
+
+  renderSelectedActionButton({ icon, title, disabled, className = "", onclick }) {
+    return $el(
+      "button",
+      {
+        className: `bulker-selected-action-button ${className}`.trim(),
+        ...this.getSelectedActionProps({ title, disabled, onclick }),
+      },
+      [getIcon(icon)]
+    );
+  }
+
   renderValueRow({
     label,
-    selected,
-    added,
     leadingIcon,
     title,
     disabled = false,
     onclick,
     trailing = null,
+    rowClassName = "",
+    shellClassName = "",
   }) {
-    return $el("div.bulker-value-row-shell", {}, [
+    const tagName = onclick ? "button" : "div";
+
+    return $el("div", { className: `bulker-value-row-shell ${shellClassName}`.trim() }, [
       $el(
-        "button",
+        tagName,
         {
-          type: "button",
-          className: `bulker-value-row ${selected ? "is-selected" : ""} ${added ? "is-added" : ""}`.trim(),
+          ...(onclick ? { type: "button" } : {}),
+          className: `bulker-value-row ${rowClassName}`.trim(),
           title,
-          disabled,
-          onmousedown: (event) => {
-            this.stashScrollSnapshot();
-            event.preventDefault();
-          },
+          ...(onclick ? { disabled } : {}),
+          onmousedown: onclick
+            ? (event) => {
+                this.stashScrollSnapshot();
+                event.preventDefault();
+              }
+            : null,
           onclick,
         },
         [
@@ -1283,6 +1723,7 @@ class BulkerController {
   removeModifier(modifierId) {
     this.state.modifiers = this.state.modifiers.filter((modifier) => modifier.id !== modifierId);
     delete this.uiState.modifiers[modifierId];
+    this.selectedRowDrag = null;
 
     if (!this.state.modifiers.length) {
       const modifier = createModifier();
@@ -1373,31 +1814,12 @@ class BulkerController {
     this.addComboValues(modifierId, filteredOptions);
   }
 
-  toggleComboValue(modifierId, option) {
-    const modifier = this.getModifier(modifierId);
-    if (!modifier) {
-      return;
-    }
-
-    this.prepareSelectionMutation();
-
-    const exists = modifier.values.some((value) => String(value) === String(option));
-    if (exists) {
-      this.updateModifier(modifierId, (currentModifier) => ({
-        ...currentModifier,
-        values: currentModifier.values.filter((value) => String(value) !== String(option)),
-      }));
-      return;
-    }
-
+  addComboValue(modifierId, option) {
     this.addComboValues(modifierId, [option]);
   }
 
   addComboValues(modifierId, values) {
-    this.updateModifier(modifierId, (modifier) => ({
-      ...modifier,
-      values: dedupeValues(modifier.inputType, [...modifier.values, ...(values ?? [])]),
-    }));
+    this.appendModifierRows(modifierId, values, { animateAvailable: true });
   }
 
   updateManualDraft(modifierId, manualDraft) {
@@ -1424,10 +1846,14 @@ class BulkerController {
     uiState.manualDraft = "";
     uiState.draftError = "";
 
-    this.updateModifier(modifierId, (currentModifier) => ({
-      ...currentModifier,
-      values: dedupeValues(currentModifier.inputType, [...currentModifier.values, ...parsed.values]),
-    }));
+    const result = this.appendModifierRows(modifierId, parsed.values, {
+      duplicateMessage: "Value already selected",
+    });
+    if (!result.added) {
+      uiState.draftError = result.message;
+      this.render();
+      return;
+    }
   }
 
   togglePasteEditor(modifierId) {
@@ -1463,27 +1889,52 @@ class BulkerController {
     }
 
     uiState.draftError = "";
-    this.updateModifier(modifierId, (currentModifier) => ({
-      ...currentModifier,
-      values: dedupeValues(currentModifier.inputType, [...currentModifier.values, ...parsed.values]),
-      manualValueText: uiState.pasteBuffer,
-    }));
+    const result = this.appendModifierRows(modifierId, parsed.values, {
+      duplicateMessage: "All pasted values are already selected",
+    });
+    if (!result.added) {
+      uiState.draftError = result.message;
+      this.render();
+      return;
+    }
   }
 
   clearSelectedList(modifierId) {
     this.prepareSelectionMutation();
-    this.updateModifier(modifierId, (modifier) => ({
-      ...modifier,
-      values: [],
-    }));
+    this.updateModifier(modifierId, (modifier) => setModifierRows(modifier, []));
   }
 
-  removeModifierValue(modifierId, valueIndex) {
+  incrementModifierValueRepeat(modifierId, rowId) {
     this.prepareSelectionMutation();
-    this.updateModifier(modifierId, (modifier) => ({
-      ...modifier,
-      values: modifier.values.filter((_, index) => index !== valueIndex),
-    }));
+    this.bumpRepeatBadge(modifierId, rowId);
+    this.updateModifierRowRepeat(modifierId, rowId, (repeat) => repeat + 1);
+  }
+
+  decrementModifierValueRepeat(modifierId, rowId) {
+    const modifier = this.getModifier(modifierId);
+    const row = modifier?.values.find((candidate) => candidate.id === rowId);
+    if (!modifier || !row) {
+      return;
+    }
+
+    if (getRowRepeat(row) <= 1) {
+      this.removeModifierValue(modifierId, rowId);
+      return;
+    }
+
+    this.prepareSelectionMutation();
+    this.bumpRepeatBadge(modifierId, rowId);
+    this.updateModifierRowRepeat(modifierId, rowId, (repeat) => repeat - 1);
+  }
+
+  removeModifierValue(modifierId, rowId) {
+    this.prepareSelectionMutation();
+    this.updateModifier(modifierId, (modifier) =>
+      setModifierRows(
+        modifier,
+        modifier.values.filter((row) => row.id !== rowId)
+      )
+    );
   }
 
   stopQueueing() {
