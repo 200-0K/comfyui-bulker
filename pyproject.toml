@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "comfyui-bulker"
 description = "Frontend-first workflow variant queue builder for ComfyUI"
-version = "0.1.0"
+version = "0.2.0"
 license = { file = "LICENSE" }
 dependencies = []
 
