@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.3.0 - 2026-03-28
+
+- Added configurable dynamic output naming with per-parameter inclusion, ordering, label editing, and safe filename sanitization
+- Added compact output naming controls with previews, collapsible UI, and editable prefixes for batch result identification
+- Fixed queueing failures for UI-only controls and improved naming behavior for empty prefixes and disabled dynamic naming
+
 ## 0.2.0 - 2026-03-23
 
 - Added sortable selected-value rows so per-input execution order can be rearranged directly in the UI
