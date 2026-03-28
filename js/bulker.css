@@ -124,13 +124,129 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
 }
 
 .bulker-side-card {
+  flex: 0 0 auto;
   padding: 10px;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.03);
+}
+
+.bulker-inline-toggle,
+.bulker-side-stack,
+.bulker-naming-row-meta,
+.bulker-side-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bulker-side-stack {
+  margin-top: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.bulker-output-naming-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bulker-side-toggle {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.bulker-side-toggle:hover,
+.bulker-side-toggle:focus-visible {
+  color: rgba(255, 255, 255, 0.96);
+  outline: none;
+}
+
+.bulker-inline-toggle {
+  margin-top: 6px;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+}
+
+.bulker-inline-toggle-compact {
+  margin-top: 0;
+  flex: 0 0 auto;
+  gap: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.bulker-inline-toggle input {
+  margin: 0;
+}
+
+.bulker-naming-row-meta {
+  min-width: 0;
+  flex: 1 1 92px;
+}
+
+.bulker-naming-preview-list,
+.bulker-naming-list {
+  margin-top: 8px;
+}
+
+.bulker-naming-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.bulker-naming-rule-shell {
+  position: relative;
+}
+
+.bulker-naming-rule-shell.is-dragging {
+  opacity: 0.42;
+}
+
+.bulker-naming-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  min-width: 0;
+}
+
+.bulker-input-compact {
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.bulker-naming-title-input {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .bulker-naming-row {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .bulker-naming-row-meta {
+    flex: 1 1 100%;
+  }
 }
 
 .bulker-modifier {
@@ -634,6 +750,18 @@
 .bulker-sort-handle:disabled {
   opacity: 0.35;
   cursor: not-allowed;
+}
+
+.bulker-sort-handle-compact {
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+}
+
+.bulker-sort-handle-compact .bulker-icon,
+.bulker-sort-handle-compact .bulker-icon svg {
+  width: 12px;
+  height: 12px;
 }
 
 .bulker-repeat-stepper {

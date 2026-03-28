@@ -1,5 +1,10 @@
 import { api } from "../../scripts/api.js";
 import { formatCombinationSummary, getJobCount, iterateCombinations } from "./combinations.js";
+import {
+  appendFilenameSuffix,
+  buildCombinationFilenameSuffix,
+  getOutputNamingBasePrefix,
+} from "./filenames.js";
 import { getWidgetIndex } from "./graph.js";
 
 export const DEFAULT_QUEUE_DELAY_MS = 250;
@@ -117,9 +122,48 @@ function applyCombination(payload, combination) {
   return payload;
 }
 
+function canMutateFilenamePrefix(value) {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
+function getFilenamePrefixTargetIds(payload) {
+  const promptGraph = getPromptGraph(payload);
+  return Object.entries(promptGraph ?? {})
+    .filter(([, promptNode]) => promptNode?.inputs && "filename_prefix" in promptNode.inputs)
+    .map(([nodeId]) => String(nodeId));
+}
+
+function applyDynamicFilenamePrefixes(payload, combination, modifiers, outputNaming) {
+  if (!outputNaming?.enabled) {
+    return payload;
+  }
+
+  const suffix = buildCombinationFilenameSuffix({ combination, outputNaming, modifiers });
+  const promptGraph = getPromptGraph(payload);
+  for (const nodeId of getFilenamePrefixTargetIds(payload)) {
+    const promptNode = promptGraph?.[nodeId];
+    const currentPrefix = promptNode?.inputs?.filename_prefix;
+    if (!canMutateFilenamePrefix(currentPrefix)) {
+      continue;
+    }
+
+    const basePrefix = getOutputNamingBasePrefix(outputNaming, currentPrefix);
+    const nextPrefix = suffix ? appendFilenameSuffix(basePrefix, suffix) : basePrefix;
+    promptNode.inputs.filename_prefix = nextPrefix;
+    setWorkflowValue(payload.workflow, {
+      nodeId,
+      inputName: "filename_prefix",
+      value: nextPrefix,
+    });
+  }
+
+  return payload;
+}
+
 export async function queueCombinations({
   basePrompt,
   modifiers,
+  outputNaming,
   delayMs = DEFAULT_QUEUE_DELAY_MS,
   shouldStop,
   onProgress,
@@ -135,7 +179,12 @@ export async function queueCombinations({
     const summary = formatCombinationSummary(combination);
     onProgress?.({ queuedJobs, totalJobs, summary, phase: "queueing" });
 
-    const payload = applyCombination(ensureQueuePayload(basePrompt), combination);
+    const payload = applyDynamicFilenamePrefixes(
+      applyCombination(ensureQueuePayload(basePrompt), combination),
+      combination,
+      modifiers,
+      outputNaming
+    );
     await api.queuePrompt(0, payload);
     queuedJobs += 1;
 

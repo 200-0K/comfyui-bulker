@@ -7,6 +7,7 @@ const UNSUPPORTED_WIDGET_TYPES = new Set([
   "hidden",
   "ttNhidden",
 ]);
+const UNSUPPORTED_WIDGET_NAMES = new Set(["control_after_generate"]);
 
 const TEXT_WIDGET_TYPES = new Set(["customtext", "text", "string"]);
 const NUMBER_WIDGET_TYPES = new Set(["number", "slider"]);
@@ -40,6 +41,10 @@ export function getNodeChoices() {
 
 export function getWidgetType(widget) {
   if (!widget || !widget.name) {
+    return null;
+  }
+
+  if (UNSUPPORTED_WIDGET_NAMES.has(widget.name)) {
     return null;
   }
 
@@ -135,7 +140,9 @@ export function validateModifier(modifier) {
   const widget = getEditableWidget(nextModifier.nodeId, nextModifier.inputName);
   if (!widget) {
     nextModifier.invalidReason = nextModifier.inputName
-      ? "Input is missing or unsupported"
+      ? UNSUPPORTED_WIDGET_NAMES.has(nextModifier.inputName)
+        ? "Input is UI-only and cannot be queued"
+        : "Input is missing or unsupported"
       : "Select an input";
     return nextModifier;
   }

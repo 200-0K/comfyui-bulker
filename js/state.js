@@ -48,6 +48,26 @@ export function createModifier(partial = {}) {
   };
 }
 
+export function createOutputNamingRule(partial = {}) {
+  return {
+    modifierId: partial.modifierId != null ? String(partial.modifierId) : "",
+    enabled: partial.enabled !== false,
+    showLabel: partial.showLabel !== false,
+    label: partial.label ?? "",
+  };
+}
+
+export function createOutputNaming(partial = {}) {
+  return {
+    enabled: Boolean(partial.enabled),
+    collapsed: Boolean(partial.collapsed),
+    basePrefix: String(partial.basePrefix ?? "bulker-"),
+    rules: Array.isArray(partial.rules)
+      ? partial.rules.map((rule) => createOutputNamingRule(rule))
+      : [],
+  };
+}
+
 export function createState(partial = {}) {
   return {
     modifiers: Array.isArray(partial.modifiers)
@@ -56,6 +76,7 @@ export function createState(partial = {}) {
     ui: {
       open: Boolean(partial.ui?.open),
     },
+    outputNaming: createOutputNaming(partial.outputNaming),
   };
 }
 
@@ -79,6 +100,20 @@ export function serializeState(state) {
     })),
     ui: {
       open: Boolean(state.ui?.open),
+    },
+    outputNaming: {
+      enabled: Boolean(state.outputNaming?.enabled),
+      collapsed: Boolean(state.outputNaming?.collapsed),
+      basePrefix: String(state.outputNaming?.basePrefix ?? "bulker-"),
+      rules: (state.outputNaming?.rules ?? []).map((rule) => {
+        const nextRule = createOutputNamingRule(rule);
+        return {
+          modifierId: nextRule.modifierId,
+          enabled: nextRule.enabled,
+          showLabel: nextRule.showLabel,
+          label: nextRule.label,
+        };
+      }),
     },
   };
 }

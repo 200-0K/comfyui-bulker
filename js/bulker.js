@@ -1,5 +1,11 @@
 import { app } from "../../scripts/app.js";
 import { $el } from "../../scripts/ui.js";
+import {
+  appendFilenameSuffix,
+  buildCombinationFilenameSuffix,
+  getDefaultFilenameRuleLabel,
+  getOutputNamingBasePrefix,
+} from "./filenames.js";
 import { DEFAULT_QUEUE_DELAY_MS, queueCombinations } from "./queue.js";
 import {
   formatCombinationSummary,
@@ -16,7 +22,7 @@ import {
   validateModifier,
 } from "./graph.js";
 import { loadState, saveState } from "./persistence.js";
-import { createModifier, createModifierValueRow, createState } from "./state.js";
+import { createModifier, createModifierValueRow, createOutputNamingRule, createState } from "./state.js";
 import { dedupeValues, formatValue, getValueKey, parseManualValues, valuesToText } from "./values.js";
 
 const EXTENSION_NAME = "bulker";
@@ -45,6 +51,10 @@ const ICONS = {
   close: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>`,
   plusBox: `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="2"/><path d="M8 5.25v5.5M5.25 8h5.5"/></svg>`,
   checkBox: `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.75" y="2.75" width="10.5" height="10.5" rx="2"/><path d="M5.5 8.25l1.75 1.75 3.25-3.5"/></svg>`,
+  arrowUp: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.25v-8.5M4.75 7l3.25-3.25L11.25 7"/></svg>`,
+  arrowDown: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.75v8.5M4.75 9l3.25 3.25L11.25 9"/></svg>`,
+  chevronDown: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 6.25 8 9.75l3.5-3.5"/></svg>`,
+  chevronRight: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.25 4.5 9.75 8l-3.5 3.5"/></svg>`,
   grip: `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.25 3.5h.01M5.25 8h.01M5.25 12.5h.01M10.75 3.5h.01M10.75 8h.01M10.75 12.5h.01"/></svg>`,
   dot: `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/></svg>`,
 };
@@ -277,6 +287,35 @@ function getAvailablePaneEmptyMessage(filteredOptions, filteredAvailableOptions)
   return "No matches";
 }
 
+function getOutputNamingSourceLabel(modifier) {
+  const nodeLabel = displayText(modifier?.nodeLabel, modifier?.nodeId ? `[${modifier.nodeId}] Node` : "Node");
+  const inputLabel = displayText(modifier?.inputLabel, modifier?.inputName || "Input");
+  return `${nodeLabel} -> ${inputLabel}`;
+}
+
+function getOrderedOutputNamingModifierIds(existingRules, modifiers) {
+  const modifierIds = new Set((modifiers ?? []).map((modifier) => String(modifier.id)));
+  const orderedModifierIds = [];
+
+  for (const rule of existingRules ?? []) {
+    const modifierId = String(rule?.modifierId ?? "");
+    if (!modifierId || !modifierIds.has(modifierId) || orderedModifierIds.includes(modifierId)) {
+      continue;
+    }
+
+    orderedModifierIds.push(modifierId);
+  }
+
+  for (const modifier of modifiers ?? []) {
+    const modifierId = String(modifier.id);
+    if (!orderedModifierIds.includes(modifierId)) {
+      orderedModifierIds.push(modifierId);
+    }
+  }
+
+  return orderedModifierIds;
+}
+
 class BulkerDialog {
   constructor(controller) {
     this.controller = controller;
@@ -321,8 +360,9 @@ class BulkerDialog {
                 },
               })),
             ]),
-            (this.sidebar = $el("div.bulker-sidebar", {}, [
+            (this.sidebar = $el("div.bulker-sidebar", { dataset: { bulkerScrollKey: "sidebar" } }, [
               (this.previewCard = $el("div.bulker-side-card")),
+              (this.namingCard = $el("div.bulker-side-card")),
               (this.progressCard = $el("div.bulker-side-card")),
             ])),
           ]),
@@ -388,6 +428,7 @@ class BulkerController {
     this.modalRect = getDefaultModalRect();
     this.dragState = null;
     this.selectedRowDrag = null;
+    this.namingRuleDrag = null;
     this.resizeState = null;
     this.dialog = new BulkerDialog(this);
     this.toolbarButton = null;
@@ -474,6 +515,65 @@ class BulkerController {
     for (const modifier of this.state.modifiers) {
       this.getModifierUiState(modifier.id);
     }
+  }
+
+  syncOutputNamingRules() {
+    const existingRules = this.state.outputNaming?.rules ?? [];
+    const rulesByModifierId = new Map(
+      existingRules.map((rule) => [String(rule.modifierId ?? ""), rule])
+    );
+    const orderedModifierIds = getOrderedOutputNamingModifierIds(existingRules, this.state.modifiers);
+
+    this.state.outputNaming = {
+      enabled: Boolean(this.state.outputNaming?.enabled),
+      collapsed: Boolean(this.state.outputNaming?.collapsed),
+      basePrefix: String(this.state.outputNaming?.basePrefix ?? "bulker-"),
+      rules: orderedModifierIds.map((modifierId) =>
+        createOutputNamingRule({
+          ...rulesByModifierId.get(modifierId),
+          modifierId,
+        })
+      ),
+    };
+  }
+
+  getOutputNamingModifiers() {
+    const configuredModifierIds = new Set(
+      this.state.modifiers
+        .filter((modifier) => modifier?.nodeId && modifier?.inputName)
+        .map((modifier) => modifier.id)
+    );
+
+    return (this.state.outputNaming?.rules ?? [])
+      .map((rule) => ({
+        rule,
+        modifier: this.getModifier(rule.modifierId),
+      }))
+      .filter(({ modifier }) => modifier && configuredModifierIds.has(modifier.id));
+  }
+
+  getOutputNamingPreviewEntries(limit = 3) {
+    if (!this.state.outputNaming?.enabled) {
+      return [];
+    }
+
+    const basePrefix = getOutputNamingBasePrefix(this.state.outputNaming);
+    const previewEntries = getCombinationPreview(this.state.modifiers, limit)
+      .map((combination) =>
+        buildCombinationFilenameSuffix({
+          combination,
+          outputNaming: this.state.outputNaming,
+          modifiers: this.state.modifiers,
+        })
+      )
+      .filter(Boolean)
+      .map((suffix) => appendFilenameSuffix(basePrefix, suffix));
+
+    if (previewEntries.length) {
+      return previewEntries;
+    }
+
+    return basePrefix ? [basePrefix] : [];
   }
 
   scheduleModifierAnimationCleanup(modifierId, cleanup, delay = VALUE_TRANSITION_MS) {
@@ -727,6 +827,7 @@ class BulkerController {
       return validateModifier(nextModifier);
     });
 
+    this.syncOutputNamingRules();
     this.cleanupUiState();
     this.persist();
   }
@@ -744,6 +845,7 @@ class BulkerController {
     this.state.ui.open = false;
     this.closeAllPickers();
     this.selectedRowDrag = null;
+    this.namingRuleDrag = null;
     this.persist();
     this.dialog.close();
   }
@@ -962,6 +1064,145 @@ class BulkerController {
     this.selectedRowDrag = null;
   }
 
+  clearNamingRuleDropIndicator() {
+    if (!this.namingRuleDrag?.indicatorElement) {
+      return;
+    }
+
+    this.namingRuleDrag.indicatorElement.classList.remove(
+      "is-drop-before",
+      "is-drop-after",
+      "is-drop-target"
+    );
+    this.namingRuleDrag.indicatorElement = null;
+    this.namingRuleDrag.dropPosition = null;
+    this.namingRuleDrag.dropModifierId = null;
+  }
+
+  startNamingRuleDrag(event, modifierId) {
+    if (this.queueState.active) {
+      event.preventDefault();
+      return;
+    }
+
+    event.stopPropagation();
+    this.stashScrollSnapshot();
+    this.namingRuleDrag = {
+      modifierId,
+      indicatorElement: null,
+      dropPosition: null,
+      dropModifierId: null,
+    };
+
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", modifierId);
+    }
+
+    const rowElement = event.currentTarget.closest(".bulker-naming-rule-shell");
+    if (rowElement) {
+      rowElement.classList.add("is-dragging");
+    }
+  }
+
+  updateNamingRuleDropIndicator(element, position, modifierId) {
+    if (!this.namingRuleDrag) {
+      return;
+    }
+
+    if (this.namingRuleDrag.indicatorElement !== element) {
+      this.clearNamingRuleDropIndicator();
+    }
+
+    element.classList.add("is-drop-target");
+    element.classList.toggle("is-drop-before", position === "before");
+    element.classList.toggle("is-drop-after", position === "after");
+    this.namingRuleDrag.indicatorElement = element;
+    this.namingRuleDrag.dropPosition = position;
+    this.namingRuleDrag.dropModifierId = modifierId;
+  }
+
+  handleNamingRuleDragOver(event, modifierId) {
+    if (!this.namingRuleDrag) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (this.namingRuleDrag.modifierId === modifierId) {
+      this.clearNamingRuleDropIndicator();
+      return;
+    }
+
+    const position = getSelectedRowDropPosition(event);
+    this.updateNamingRuleDropIndicator(event.currentTarget, position, modifierId);
+  }
+
+  handleNamingRuleDragLeave(event) {
+    if (!this.namingRuleDrag || this.namingRuleDrag.indicatorElement !== event.currentTarget) {
+      return;
+    }
+
+    const nextTarget = event.relatedTarget;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+
+    this.clearNamingRuleDropIndicator();
+  }
+
+  moveOutputNamingRuleToTarget(modifierId, targetModifierId, position) {
+    if (!modifierId || !targetModifierId || !position) {
+      return;
+    }
+
+    const rules = [...(this.state.outputNaming?.rules ?? [])];
+    const fromIndex = rules.findIndex((rule) => rule.modifierId === modifierId);
+    if (fromIndex === -1) {
+      return;
+    }
+
+    const nextRules = [...rules];
+    const [movedRule] = nextRules.splice(fromIndex, 1);
+    const insertionIndex = nextRules.findIndex((rule) => rule.modifierId === targetModifierId);
+    if (insertionIndex === -1) {
+      return;
+    }
+
+    nextRules.splice(position === "after" ? insertionIndex + 1 : insertionIndex, 0, movedRule);
+    this.prepareSelectionMutation();
+    this.state.outputNaming = {
+      ...this.state.outputNaming,
+      rules: nextRules,
+    };
+    this.render();
+  }
+
+  handleNamingRuleDrop(event, modifierId) {
+    if (!this.namingRuleDrag) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (this.namingRuleDrag.modifierId === modifierId) {
+      this.clearNamingRuleDropIndicator();
+      return;
+    }
+
+    const position = getSelectedRowDropPosition(event);
+    this.moveOutputNamingRuleToTarget(this.namingRuleDrag.modifierId, modifierId, position);
+    this.clearNamingRuleDropIndicator();
+  }
+
+  endNamingRuleDrag(event) {
+    event.currentTarget.closest(".bulker-naming-rule-shell")?.classList.remove("is-dragging");
+    this.clearNamingRuleDropIndicator();
+    this.namingRuleDrag = null;
+  }
+
   render() {
     const focusSnapshot = this.skipNextFocusRestore ? null : this.captureFocusSnapshot();
     this.skipNextFocusRestore = false;
@@ -972,6 +1213,7 @@ class BulkerController {
     this.renderModifiers();
     this.renderPreview();
     this.renderProgress();
+    this.renderOutputNamingSafe();
     this.restoreFocusSnapshot(focusSnapshot);
     this.restoreScrollSnapshot(scrollSnapshot);
   }
@@ -987,19 +1229,40 @@ class BulkerController {
     this.renderModifierCardInPlace(modifierId);
     this.renderPreview();
     this.renderProgress();
+    this.renderOutputNamingSafe();
     this.restoreFocusSnapshot(focusSnapshot);
     this.restoreScrollSnapshot(scrollSnapshot);
+  }
+
+  renderOutputNamingSafe() {
+    try {
+      this.renderOutputNaming();
+    } catch (error) {
+      console.error("[bulker] Output naming render failed", error);
+      this.dialog.namingCard.replaceChildren(
+        ...[
+          $el("div.bulker-side-head", {}, [
+            $el("div.bulker-side-title", {}, [getIcon("checkBox"), $el("span", { textContent: "Output Names" })]),
+          ]),
+          $el("div", {
+            className: "bulker-inline-note bulker-inline-error",
+            textContent: error?.message || "Output naming failed to render.",
+          }),
+        ].filter(Boolean)
+      );
+    }
   }
 
   renderChrome() {
     const totalJobs = getJobCount(this.state.modifiers);
     const validModifiers = getValidModifiers(this.state.modifiers);
+    const outputNamingEnabled = Boolean(this.state.outputNaming?.enabled);
 
     this.dialog.headerStats.replaceChildren(
       this.renderStatChip("fork", `${this.state.modifiers.length}`, "Modifier count"),
       this.renderStatChip("list", `${totalJobs}`, "Job count")
     );
-    this.dialog.footerMeta.textContent = `${validModifiers.length} ready • ${DEFAULT_QUEUE_DELAY_MS}ms delay`;
+    this.dialog.footerMeta.textContent = `${validModifiers.length} ready • ${DEFAULT_QUEUE_DELAY_MS}ms delay • names ${outputNamingEnabled ? "on" : "off"}`;
     this.dialog.addButton.disabled = this.queueState.active;
     this.dialog.startButton.disabled = this.queueState.active || totalJobs === 0;
     this.dialog.stopButton.disabled = !this.queueState.active;
@@ -1672,9 +1935,220 @@ class BulkerController {
           )
           : $el("div.bulker-inline-note", { textContent: "No valid combinations" }),
         hiddenCount > 0
-          ? $el("div.bulker-inline-note", { textContent: `+ ${hiddenCount} more` })
+          ? $el("div.bulker-inline-note", { textContent: `+${hiddenCount}` })
           : null,
       ].filter(Boolean)
+    );
+  }
+
+  getOutputNamingMetaText(enabled, includedCount, totalRuleCount) {
+    if (!enabled) {
+      return "Dynamic filename suffixes are disabled";
+    }
+
+    return `${includedCount}/${totalRuleCount} included • label-value`;
+  }
+
+  renderOutputNamingPreview(preview, namingModifiers) {
+    if (preview.length > 0) {
+      return $el(
+        "div.bulker-naming-preview-list",
+        {},
+        preview.map((suffix, index) =>
+          $el("div.bulker-preview-row", {}, [
+            $el("span.bulker-preview-index", { textContent: String(index + 1) }),
+            $el("div.bulker-preview-text", {
+              title: suffix,
+              textContent: suffix,
+            }),
+          ])
+        )
+      );
+    }
+
+    const textContent = namingModifiers.length > 0
+      ? "No filename parts are enabled."
+      : "Add valid modifiers to configure filename parts.";
+
+    return $el("div.bulker-inline-note", { textContent });
+  }
+
+  renderOutputNamingBody({ namingModifiers, preview, hiddenPreviewCount }) {
+    const body = [
+      $el("input.bulker-input.bulker-input-compact", {
+        type: "text",
+        value: this.state.outputNaming?.basePrefix ?? "bulker-",
+        placeholder: "Prefix",
+        title: "Filename prefix",
+        disabled: this.queueState.active,
+        dataset: {
+          bulkerFocusKey: "output-naming:base-prefix",
+        },
+        oninput: (event) => this.updateOutputNamingBasePrefix(event.target.value),
+      }),
+      this.renderOutputNamingPreview(preview, namingModifiers),
+      hiddenPreviewCount > 0 ? $el("div.bulker-inline-note", { textContent: `+${hiddenPreviewCount}` }) : null,
+      namingModifiers.length > 0
+        ? $el(
+            "div.bulker-naming-list",
+            { dataset: { bulkerScrollKey: "output-naming-list" } },
+            namingModifiers.map(({ modifier, rule }, index) =>
+              this.renderOutputNamingRow(modifier, rule, index, namingModifiers.length)
+            )
+          )
+        : null,
+      $el("div.bulker-inline-note", {
+        textContent: "Special characters are normalized into safe filename tokens.",
+      }),
+    ];
+
+    return $el("div.bulker-output-naming-body", {}, body.filter(Boolean));
+  }
+
+  renderOutputNaming() {
+    const namingModifiers = this.getOutputNamingModifiers();
+    const includedCount = namingModifiers.filter(({ rule }) => rule.enabled).length;
+    const preview = this.getOutputNamingPreviewEntries(3);
+    const hiddenPreviewCount = Math.max(0, getJobCount(this.state.modifiers) - preview.length);
+    const collapsed = Boolean(this.state.outputNaming?.collapsed);
+    const enabled = Boolean(this.state.outputNaming?.enabled);
+
+    this.dialog.namingCard.classList.toggle("is-collapsed", collapsed);
+
+    this.dialog.namingCard.replaceChildren(
+      ...[
+        $el("div.bulker-side-head", {}, [
+          $el("button.bulker-side-toggle.bulker-side-title", {
+            type: "button",
+            title: collapsed ? "Expand output naming" : "Collapse output naming",
+            onmousedown: (event) => {
+              this.stashScrollSnapshot();
+              event.preventDefault();
+            },
+            onclick: () => this.toggleOutputNamingCollapsed(),
+          }, [
+            getIcon(collapsed ? "chevronRight" : "chevronDown"),
+            $el("span", { textContent: "Output Names" }),
+          ]),
+          $el("span.bulker-preview-chip", {
+            textContent: enabled ? `${includedCount}` : "off",
+            title: enabled ? "Included modifiers" : "Dynamic naming disabled",
+          }),
+        ]),
+        $el("div.bulker-side-meta", {
+          textContent: this.getOutputNamingMetaText(enabled, includedCount, namingModifiers.length),
+        }),
+        collapsed
+          ? null
+          : $el("div.bulker-side-stack", {}, [
+              $el("label.bulker-inline-toggle", {}, [
+                $el("input", {
+                  type: "checkbox",
+                  checked: this.state.outputNaming?.enabled,
+                  disabled: this.queueState.active,
+                  onchange: (event) => this.setOutputNamingEnabled(event.target.checked),
+                }),
+                $el("span", { textContent: "Enable dynamic output naming" }),
+              ]),
+              enabled
+                ? this.renderOutputNamingBody({
+                    namingModifiers,
+                    preview,
+                    hiddenPreviewCount,
+                  })
+                : null,
+            ].filter(Boolean)),
+      ].filter(Boolean)
+    );
+  }
+
+  renderOutputNamingRow(modifier, rule, index, totalRules) {
+    const defaultLabel = getDefaultFilenameRuleLabel(modifier);
+    const sourceLabel = getOutputNamingSourceLabel(modifier);
+
+    return $el(
+      "div",
+      {
+        className: "bulker-naming-rule-shell bulker-selected-row",
+        dataset: { modifierId: modifier.id },
+        ondragover: (event) => this.handleNamingRuleDragOver(event, modifier.id),
+        ondragleave: (event) => this.handleNamingRuleDragLeave(event),
+        ondrop: (event) => this.handleNamingRuleDrop(event, modifier.id),
+      },
+      [
+        $el("div.bulker-naming-row", {}, [
+          this.renderNamingRuleDragHandle(modifier.id, index, totalRules),
+          $el("div.bulker-naming-row-meta", { title: sourceLabel }, [
+            $el("input", {
+              className: "bulker-input bulker-input-compact bulker-naming-title-input",
+              type: "text",
+              value: rule.label ?? "",
+              placeholder: defaultLabel,
+              title: `${sourceLabel}\nLabel (${defaultLabel})`,
+              disabled: this.queueState.active || !rule.enabled || rule.showLabel === false,
+              dataset: {
+                bulkerFocusKey: `output-naming:label:${modifier.id}`,
+              },
+              oninput: (event) => this.updateOutputNamingRule(modifier.id, (currentRule) => ({
+                ...currentRule,
+                label: event.target.value,
+              })),
+            }),
+          ]),
+          $el("label", {
+            className: "bulker-inline-toggle bulker-inline-toggle-compact",
+            title: "Include this value in filenames",
+          }, [
+            $el("input", {
+              type: "checkbox",
+              checked: rule.enabled,
+              disabled: this.queueState.active,
+              onchange: (event) => this.updateOutputNamingRule(modifier.id, (currentRule) => ({
+                ...currentRule,
+                enabled: event.target.checked,
+              })),
+            }),
+            $el("span", { textContent: "Use" }),
+          ]),
+          $el("label", {
+            className: "bulker-inline-toggle bulker-inline-toggle-compact",
+            title: "Show the label before the value",
+          }, [
+            $el("input", {
+              type: "checkbox",
+              checked: rule.showLabel !== false,
+              disabled: this.queueState.active || !rule.enabled,
+              onchange: (event) => this.updateOutputNamingRule(modifier.id, (currentRule) => ({
+                ...currentRule,
+                showLabel: event.target.checked,
+              })),
+            }),
+            $el("span", { textContent: "Key" }),
+          ]),
+        ]),
+      ]
+    );
+  }
+
+  renderNamingRuleDragHandle(modifierId, index, totalRules) {
+    return $el(
+      "button",
+      {
+        className: "bulker-sort-handle bulker-sort-handle-compact",
+        ...this.getSelectedActionProps({
+          title: totalRules > 1 ? `Drag to reorder item ${index + 1}` : "No other items to reorder",
+          disabled: this.queueState.active || totalRules <= 1,
+          onclick: null,
+        }),
+        draggable: !this.queueState.active && totalRules > 1,
+        onmousedown: (event) => {
+          this.stashScrollSnapshot();
+          event.stopPropagation();
+        },
+        ondragstart: (event) => this.startNamingRuleDrag(event, modifierId),
+        ondragend: (event) => this.endNamingRuleDrag(event),
+      },
+      [getIcon("grip")]
     );
   }
 
@@ -1720,10 +2194,45 @@ class BulkerController {
     this.render();
   }
 
+  setOutputNamingEnabled(enabled) {
+    this.state.outputNaming = {
+      ...this.state.outputNaming,
+      enabled: Boolean(enabled),
+    };
+    this.render();
+  }
+
+  toggleOutputNamingCollapsed() {
+    this.state.outputNaming = {
+      ...this.state.outputNaming,
+      collapsed: !this.state.outputNaming?.collapsed,
+    };
+    this.render();
+  }
+
+  updateOutputNamingBasePrefix(basePrefix) {
+    this.state.outputNaming = {
+      ...this.state.outputNaming,
+      basePrefix,
+    };
+    this.render();
+  }
+
+  updateOutputNamingRule(modifierId, updater) {
+    this.state.outputNaming = {
+      ...this.state.outputNaming,
+      rules: (this.state.outputNaming?.rules ?? []).map((rule) =>
+        rule.modifierId === modifierId ? createOutputNamingRule(updater({ ...rule })) : rule
+      ),
+    };
+    this.render();
+  }
+
   removeModifier(modifierId) {
     this.state.modifiers = this.state.modifiers.filter((modifier) => modifier.id !== modifierId);
     delete this.uiState.modifiers[modifierId];
     this.selectedRowDrag = null;
+    this.namingRuleDrag = null;
 
     if (!this.state.modifiers.length) {
       const modifier = createModifier();
@@ -1974,6 +2483,7 @@ class BulkerController {
       const result = await queueCombinations({
         basePrompt,
         modifiers,
+        outputNaming: this.state.outputNaming,
         delayMs: DEFAULT_QUEUE_DELAY_MS,
         shouldStop: () => this.queueState.stopRequested,
         onProgress: ({ queuedJobs, totalJobs: progressTotal, summary, phase }) => {
